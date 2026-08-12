@@ -10,6 +10,7 @@ Android application consumes.
 | Document | Contents |
 |---|---|
 | [docs/requirements.md](docs/requirements.md) | Database and backend requirements: schema, RLS, auth, write operations, delta sync, operations |
+| [docs/roadmap.md](docs/roadmap.md) | Milestones M0–M5, exit criteria, and cross-repo dependencies |
 
 The app's requirements document defines a backend-agnostic API contract and deliberately
 leaves the engine, schema, and enforcement unspecified. This repository makes those decisions

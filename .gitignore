@@ -1,22 +1,13 @@
-# Firebase build and deployment files
-/firebase-debug.log
-/firebase-debug.*.log
-.firebaserc
+# Supabase CLI local state
+supabase/.branches/
+supabase/.temp/
+supabase/.env
 
-# Firebase Hosting
-/firebase.json
-*.cache
-hosting/.cache
-
-# Firebase Functions
-/functions/node_modules/
-/functions/.env
-/functions/package-lock.json
-
-# Firebase Emulators
-/firebase-*.zip
-/.firebase/
-/emulator-ui/
+# Environment files — never commit keys. The service_role key in particular is
+# a full compromise of every project's data if it leaks (DB R-RLS-3).
+.env
+.env.*
+!.env.example
 
 # Logs
 *.log
@@ -24,5 +15,11 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Environment files (local configs)
-/.env.*
+# Node, if console tooling lands in this repo
+node_modules/
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

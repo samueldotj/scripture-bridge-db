@@ -186,7 +186,7 @@ not null default now()` and, where mutable, `updated_at` maintained by trigger.
 
 ```
 ref.book_canon      code (PK, USFM 3-letter: GEN, MAT, REV), name_en, sort_order,
-                    testament, chapter_count
+                    testament, canon_section, chapter_count
 ref.versification   scheme, book_code, chapter_number, verse_count
                     PK (scheme, book_code, chapter_number)
 ```
@@ -694,9 +694,11 @@ app.change_log   seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
 
 - **R-SYNC-6.** Change-log rows are retained **90 days** and pruned by a scheduled job. A
   per-project watermark records the highest pruned `seq`.
-- **R-SYNC-7.** A cursor at or below the watermark returns `cursor_expired` (HTTP 410,
+- **R-SYNC-7.** A cursor **below** the watermark returns `cursor_expired` (HTTP 410,
   APP §13.5), and the app falls back to a full fetch of its subscribed scope. Returning an empty
   page instead would look like "nothing changed" and leave the device silently stale forever.
+  A cursor *equal* to the watermark is still valid: the watermark is the highest `seq` pruned,
+  so everything after it survives. An initial sync (no cursor) is never expired.
 - **R-SYNC-8.** 90 days must exceed the longest plausible gap between a device syncing. It will
   not always: a device that is off for a season triggers a full refetch, which is correct
   behaviour and must be tested, not assumed rare.
@@ -752,11 +754,20 @@ message carries the application code.
 | `idempotency_key_required` | PT400 | 400 | §9 — **new** |
 | `idempotency_key_reuse` | PT409 | 409 | §9 — **new** |
 | `must_change_password` | PT403 | 403 | §7.2 — **new** |
+| `not_found` | PT404 | 404 | Target row absent or not visible — **new** |
+| `invalid_argument` | PT400 | 400 | Bad enum value; `details` carries `field` and `value` — **new** |
+| `verse_empty` | PT422 | 422 | `done` requested on a verse with no text — **new** |
+| `verse_flagged` | PT422 | 422 | Status change on a flagged verse; resolve the comment instead — **new** |
+| `password_unchanged` | PT422 | 422 | Forced change completed without the password actually changing (§7.2) — **new** |
 
-- **R-ERR-2.** The five codes marked **new** extend APP §13.5. APP R-API-12 requires the app to
+- **R-ERR-2.** The ten codes marked **new** extend APP §13.5. APP R-API-12 requires the app to
   treat unrecognised codes as retryable-unknown and keep the write in the outbox — which is
-  wrong for all five, since none will succeed on retry. **APP §13.5 must be amended to include
-  them** before the app implements its error handling (§17 #6).
+  wrong for every one of them, since none will succeed on retry. **APP §13.5 must be amended to
+  include them** before the app implements its error handling (§17 #6).
+- **R-ERR-5.** New codes are added only for conditions the app must handle *differently*.
+  Three separate `invalid_*` codes were collapsed into `invalid_argument` with a `field`
+  detail for exactly this reason: they are all client programming errors with one correct
+  client response. Every code added is a branch someone has to write, test, and translate.
 - **R-ERR-3.** An RLS denial surfaces as an empty result on reads and as an explicit typed
   error on writes. The write functions check permission and raise `forbidden`/`not_assigned`
   rather than letting a policy silently filter a row and produce a "succeeded but nothing
@@ -988,7 +999,7 @@ each end-to-end budget for network and rendering.
 | 3 | Region and data-residency decision before the production project is created; it cannot be changed afterwards (R-PLAT-DB-3). | Decision |
 | 4 | **USFM round-trip: sidecar markup storage, or accept structurally plain export?** (R-USFM-2). Determines whether the MVP's vertical slice ends in output the partner organisation can publish. Depends on APP §20 #8. | Decision |
 | 5 | Which versification scheme for the first cohort (R-DATA-2)? Immutable per project, and wrong choices surface only at export. | Decision |
-| 6 | **APP §13.5 must be amended with the five new error codes of §11.2**, or the app will treat non-retryable failures as retryable and hold them in the outbox forever (APP R-API-12). | Dependency |
+| 6 | **APP §13.5 must be amended with the ten new error codes of §11.2**, or the app will treat non-retryable failures as retryable and hold them in the outbox forever (APP R-API-12). The set grew from five to ten as the write RPCs were implemented; treat it as final only once those are tested. | Dependency |
 | 7 | Who owns the web console, and does it hold the service key in a server-side component? A console that needs the service key in a browser bundle is not deliverable under R-RLS-3. This is APP §20 #6 seen from the backend. | Dependency |
 | 8 | Is a hosted staging project available for app development to integrate against before the console exists (APP §20 #7)? The seeded local stack plus these RPCs is a sufficient answer if it is published as a runnable target. | Dependency |
 | 9 | Retention periods — 7 days for idempotency keys, 90 days for the change log — are asserted from the connectivity profile in APP §2.3, not measured. Revisit after the pilot with real device sync intervals. | Verification |

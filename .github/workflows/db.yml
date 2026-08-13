@@ -1,0 +1,53 @@
+name: db
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: reset from zero and run pgTAP
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      # R-MIG-5: the only proof the migration chain still builds a working
+      # database from nothing. `db start` brings up Postgres alone — the API
+      # gateway, Studio, and the rest are not needed to apply migrations or run
+      # pgTAP, and starting them costs CI minutes for no coverage.
+      - name: Start Postgres
+        run: supabase db start
+
+      # Applies every migration in order, then seed.sql. Fails on the first
+      # migration that does not apply cleanly, and on the reference-data
+      # self-check in 20260811000002 (66 books, 1,189 chapters, 31,103 verses).
+      - name: Reset from zero
+        run: supabase db reset
+
+      - name: Run tests
+        run: supabase test db
+
+      # Migrations are forward-only and linear (R-MIG-2). A migration edited
+      # after it has been applied elsewhere will not show up here, but a
+      # migration whose file list disagrees with what the local database
+      # recorded will.
+      - name: Check for uncommitted schema drift
+        run: |
+          supabase db diff --schema app,api,ref > drift.sql
+          if [ -s drift.sql ]; then
+            echo "::error::Schema drift detected — the database does not match the migrations:"
+            cat drift.sql
+            exit 1
+          fi
+          echo "No drift."
+
+      - name: Dump logs on failure
+        if: failure()
+        run: supabase status || true

@@ -4,7 +4,7 @@
 -- means a later data-only change is caught by the test suite too.
 
 begin;
-\ir ../helpers.sql
+\ir _helpers.psql
 select no_plan();
 
 -- ---------------------------------------------------------------------------
@@ -81,11 +81,20 @@ select throws_ok(
   'the versification scheme cannot be changed after project creation');
 
 -- A book with no versification rows cannot be materialised.
+--
+-- This used to try GEN against the eng scheme, from when only Matthew was
+-- seeded. Every book now has eng versification, so the missing-data case is a
+-- SCHEME with none: org is registered but deliberately unseeded, precisely so
+-- that selecting it fails loudly instead of producing wrong verse counts.
+insert into app.project (name, language_name, language_code, script_code,
+                         text_direction, versification_scheme)
+values ('P-org', 'Test Language', 'xx', 'Latn', 'ltr', 'org');
+
 select throws_ok(
   $$ select app.materialise_book(
-       (select id from app.project where name = 'P1'), 'GEN') $$,
+       (select id from app.project where name = 'P-org'), 'MAT') $$,
   'PT422', 'versification_missing',
-  'materialising a book without versification data is refused');
+  'materialising against a scheme with no versification data is refused');
 
 select * from finish();
 rollback;

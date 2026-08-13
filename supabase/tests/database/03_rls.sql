@@ -10,7 +10,7 @@
 -- these tests running as the owner and passing while asserting nothing.
 
 begin;
-\ir ../helpers.sql
+\ir _helpers.psql
 select no_plan();
 
 -- ---------------------------------------------------------------------------

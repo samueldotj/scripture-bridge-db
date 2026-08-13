@@ -19,7 +19,7 @@
 -- ===========================================================================
 
 begin;
-\ir ../helpers.sql
+\ir _helpers.psql
 select no_plan();
 
 select tests.create_user('alice');
@@ -44,7 +44,7 @@ grant select on tests.p1, tests.v1 to authenticated;
 -- ---------------------------------------------------------------------------
 
 select set_config('request.jwt.claims', tests.jwt('alice'), true);
-select set_config('request.headers', '{"idempotency-key": "s1"}', true);
+select set_config('request.headers', '{"idempotency-key": "test-key-s1"}', true);
 set local role authenticated;
 
 select is(jsonb_array_length(

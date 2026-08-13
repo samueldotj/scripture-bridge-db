@@ -6,7 +6,7 @@
 -- both are silent, and both are why this file runs first.
 
 begin;
-\ir ../helpers.sql
+\ir _helpers.psql
 select no_plan();
 
 -- ---------------------------------------------------------------------------
@@ -21,16 +21,21 @@ select is_empty(
   'every table in app and ref has row level security enabled and forced');
 
 -- ---------------------------------------------------------------------------
--- R-RLS-5: authenticated holds NO write privilege on any table, anywhere.
+-- R-RLS-5: authenticated holds NO write privilege on our tables.
 -- This is what makes "all writes go through RPCs" true rather than intended.
+--
+-- Scoped to app/api/ref deliberately. Supabase grants `authenticated` writes on
+-- its own schemas — storage.objects being the obvious one — and asserting over
+-- every schema fails on those, which says nothing about this design.
 -- ---------------------------------------------------------------------------
 
 select is_empty(
   $$ select table_schema || '.' || table_name || ' ' || privilege_type
        from information_schema.role_table_grants
       where grantee = 'authenticated'
+        and table_schema in ('app', 'api', 'ref')
         and privilege_type in ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE') $$,
-  'authenticated has no INSERT/UPDATE/DELETE/TRUNCATE on any table');
+  'authenticated has no INSERT/UPDATE/DELETE/TRUNCATE in app, api, or ref');
 
 -- ---------------------------------------------------------------------------
 -- R-RLS-2: anon reaches nothing.

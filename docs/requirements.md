@@ -420,6 +420,11 @@ app.can_edit_verse(verse uuid)    -- membership + assignment + chapter not appro
 - **R-RLS-10.** Policies reference `auth.uid()` as `(select auth.uid())`. The subquery form is
   evaluated once per statement as an InitPlan rather than once per row; the difference is
   substantial on the verse table and costs nothing.
+  **This idiom is scalar-only.** For set membership the form is
+  `x in (select app.my_project_ids())`, where the helper returns `setof uuid`. Writing
+  `x = any ((select …))` against an array-returning helper is a syntax trap, not a slow
+  query: a parenthesised sub-SELECT in `ANY` position is parsed as a subquery, so the
+  comparison becomes `uuid = uuid[]` and the migration fails outright.
 - **R-RLS-11.** Read access: a member of a project can read **all** content of that project.
   Translators are not restricted to their assigned chapters for reading — consistency of
   terminology across the book requires seeing other chapters, and per-chapter read filtering

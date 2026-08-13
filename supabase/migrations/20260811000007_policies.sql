@@ -18,10 +18,15 @@
 --    that forgets that check is a privilege escalation with the API's own
 --    signature on it.
 --
--- 3. Policies use `(select app.my_project_ids())`. The subquery form is
---    evaluated once per statement as an InitPlan rather than once per row
---    (R-RLS-10). Removing the parentheses silently turns a constant-time check
---    into a per-row one on a 31,000-row table.
+-- 3. Policies use `x in (select app.my_project_ids())`. The subquery is
+--    evaluated once per statement as a hashed SubPlan rather than once per row
+--    (R-RLS-10). Rewriting it as a per-row function call silently turns a
+--    constant-time check into a per-row one on a 31,000-row table.
+--
+--    Do NOT "optimise" this into `= any ((select ...))` by analogy with the
+--    scalar `(select auth.uid())` idiom — a parenthesised sub-SELECT in ANY
+--    position is read as a subquery, not an array, and the whole migration
+--    fails with "operator does not exist: uuid = uuid[]".
 -- ===========================================================================
 
 -- ---------------------------------------------------------------------------
@@ -35,19 +40,28 @@
 -- The gate is here, in the database, not in the app's navigation.
 -- ---------------------------------------------------------------------------
 
+-- Returns a SET, not an array, so policies can say `x in (select ...)`.
+--
+-- An earlier version returned uuid[] and policies used
+-- `x in (select app.my_project_ids())`. That does not work: when the
+-- operand of ANY is parenthesised as a sub-SELECT, Postgres uses subquery
+-- semantics and compares the left side against each returned ROW — whose type
+-- is uuid[] — giving "operator does not exist: uuid = uuid[]". The scalar
+-- `(select auth.uid())` idiom does not generalise to arrays.
+--
+-- `in (select ...)` gets the same once-per-statement evaluation as a hashed
+-- SubPlan, and is ordinary SQL that reads correctly.
 create or replace function app.my_project_ids()
-returns uuid[]
+returns setof uuid
 language sql
 stable
 security definer
 set search_path = ''
 as $$
-  select coalesce(
-    (select array_agg(m.project_id)
-       from app.project_member m
-      where m.profile_id = (select app.current_profile_id())
-        and (select app.password_change_complete())),
-    '{}'::uuid[]);
+  select m.project_id
+    from app.project_member m
+   where m.profile_id = (select app.current_profile_id())
+     and (select app.password_change_complete());
 $$;
 
 comment on function app.my_project_ids() is
@@ -144,7 +158,7 @@ create policy profile_select on app.profile
       select 1
         from app.project_member m
        where m.profile_id = profile.id
-         and m.project_id = any ((select app.my_project_ids()))
+         and m.project_id in (select app.my_project_ids())
     )
   );
 
@@ -154,11 +168,11 @@ create policy profile_select on app.profile
 
 create policy project_select on app.project
   for select to authenticated
-  using (id = any ((select app.my_project_ids())));
+  using (id in (select app.my_project_ids()));
 
 create policy project_member_select on app.project_member
   for select to authenticated
-  using (project_id = any ((select app.my_project_ids())));
+  using (project_id in (select app.my_project_ids()));
 
 -- Fonts are readable when referenced by a project the caller is in. The binary
 -- itself lives in Storage under its own policies (R-STORE-1).
@@ -168,7 +182,7 @@ create policy font_select on app.font
     exists (
       select 1 from app.project p
        where p.font_id = font.id
-         and p.id = any ((select app.my_project_ids()))
+         and p.id in (select app.my_project_ids())
     )
   );
 
@@ -183,23 +197,23 @@ create policy font_select on app.font
 
 create policy book_select on app.book
   for select to authenticated
-  using (project_id = any ((select app.my_project_ids())));
+  using (project_id in (select app.my_project_ids()));
 
 create policy chapter_select on app.chapter
   for select to authenticated
-  using (project_id = any ((select app.my_project_ids())));
+  using (project_id in (select app.my_project_ids()));
 
 create policy verse_select on app.verse
   for select to authenticated
-  using (project_id = any ((select app.my_project_ids())));
+  using (project_id in (select app.my_project_ids()));
 
 create policy verse_revision_select on app.verse_revision
   for select to authenticated
-  using (project_id = any ((select app.my_project_ids())));
+  using (project_id in (select app.my_project_ids()));
 
 create policy comment_select on app.comment
   for select to authenticated
-  using (project_id = any ((select app.my_project_ids())));
+  using (project_id in (select app.my_project_ids()));
 
 -- ---------------------------------------------------------------------------
 -- Sync and per-user bookkeeping
@@ -211,11 +225,11 @@ create policy comment_select on app.comment
 
 create policy change_log_select on app.change_log
   for select to authenticated
-  using (project_id = any ((select app.my_project_ids())));
+  using (project_id in (select app.my_project_ids()));
 
 create policy change_log_watermark_select on app.change_log_watermark
   for select to authenticated
-  using (project_id = any ((select app.my_project_ids())));
+  using (project_id in (select app.my_project_ids()));
 
 create policy idempotency_key_select on app.idempotency_key
   for select to authenticated

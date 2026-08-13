@@ -20,10 +20,15 @@ max_rows = 1000
 [db]
 port = 54322
 shadow_port = 54320
-# R-PLAT-DB-1: Postgres 15+. `security_invoker` views, `IS NFC NORMALIZED`, and
-# pg_snapshot_xmin() all depend on it. Must match the hosted project's version,
-# or local passes tests production will not.
-major_version = 15
+# R-PLAT-DB-1 requires Postgres 15 or later: `security_invoker` views,
+# `IS NFC NORMALIZED`, and pg_snapshot_xmin() all depend on it.
+#
+# Pinned to 17, the CLI's current default. 15 was tried first and CI failed at
+# `supabase db start` — the CLI no longer ships a local image for it, so there
+# was nothing to pull. Anything at or above 15 satisfies the requirement; the
+# binding constraint is that this MUST equal the hosted project's version
+# (§17 #1), or local passes tests production will not.
+major_version = 17
 
 [db.pooler]
 enabled = false

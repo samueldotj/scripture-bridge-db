@@ -18,21 +18,29 @@ jobs:
         with:
           version: latest
 
+      # Emitted as an annotation, which is readable through the public API.
+      # Actions logs are not: GitHub requires sign-in for them even on public
+      # repos, so without this the toolchain versions behind a red build are
+      # invisible to anyone without repository admin rights.
+      - name: Versions
+        run: |
+          echo "::notice::supabase=$(supabase --version 2>&1 | tr '\n' ' ') docker=$(docker --version 2>&1) psql=$(psql --version 2>&1 || echo none)"
+
       # R-MIG-5: the only proof the migration chain still builds a working
       # database from nothing. `db start` brings up Postgres alone — the API
       # gateway, Studio, and the rest are not needed to apply migrations or run
       # pgTAP, and starting them costs CI minutes for no coverage.
       - name: Start Postgres
-        run: supabase db start
+        run: bash scripts/ci-run.sh "supabase db start" supabase db start --debug
 
       # Applies every migration in order, then seed.sql. Fails on the first
       # migration that does not apply cleanly, and on the reference-data
       # self-check in 20260811000002 (66 books, 1,189 chapters, 31,103 verses).
       - name: Reset from zero
-        run: supabase db reset
+        run: bash scripts/ci-run.sh "supabase db reset" supabase db reset --debug
 
       - name: Run tests
-        run: supabase test db
+        run: bash scripts/ci-run.sh "supabase test db" supabase test db
 
       # Migrations are forward-only and linear (R-MIG-2). A migration edited
       # after it has been applied elsewhere will not show up here, but a
@@ -42,12 +50,11 @@ jobs:
         run: |
           supabase db diff --schema app,api,ref > drift.sql
           if [ -s drift.sql ]; then
-            echo "::error::Schema drift detected — the database does not match the migrations:"
-            cat drift.sql
+            echo "::error::Schema drift — the database does not match the migrations. $(head -c 2000 drift.sql | sed -e 's/%/%25/g' | sed -e ':a' -e 'N' -e '$!ba' -e 's/\n/%0A/g')"
             exit 1
           fi
           echo "No drift."
 
-      - name: Dump logs on failure
+      - name: Service status on failure
         if: failure()
         run: supabase status || true

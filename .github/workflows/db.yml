@@ -16,7 +16,11 @@ jobs:
       - name: Install Supabase CLI
         uses: supabase/setup-cli@v1
         with:
-          version: latest
+          # Pinned deliberately. With `latest`, an upstream CLI release can turn
+          # CI red with no change from us — and Actions logs need admin auth to
+          # read, so that failure is unusually awkward to diagnose. Bump on
+          # purpose. Observed drift during development: 2.114.0 -> 2.115.0.
+          version: 2.115.0
 
       # Emitted as an annotation, which is readable through the public API.
       # Actions logs are not: GitHub requires sign-in for them even on public

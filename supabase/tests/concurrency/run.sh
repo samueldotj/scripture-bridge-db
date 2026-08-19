@@ -220,6 +220,15 @@ is "${REVS:-0}" "2" "each save captured its own revision at a distinct rev"
 rm -f "$B_LOG" "$A_LOG"
 
 echo "1..$TESTS"
+
+# A harness that ran no assertions must not report success. Emitting the count
+# is visibility; failing on zero is the guarantee. Without this, a script that
+# silently stopped exercising anything would stay green indefinitely.
+if [ "$TESTS" -eq 0 ]; then
+  echo "Bail out! the harness ran zero assertions"
+  exit 1
+fi
+
 if [ "$FAILURES" -eq 0 ]; then
   echo "# all $TESTS concurrency assertions passed"
 else

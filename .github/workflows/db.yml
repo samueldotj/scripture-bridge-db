@@ -42,6 +42,12 @@ jobs:
       - name: Run tests
         run: bash scripts/ci-run.sh "supabase test db" supabase test db
 
+      # Two concurrent sessions, which pgTAP cannot provide: the out-of-order
+      # commit race (R-TEST-4) and simultaneous saves to one verse (R-TEST-2).
+      # Uses the runner's psql against the started database.
+      - name: Concurrency tests
+        run: bash scripts/ci-run.sh "concurrency harness" bash supabase/tests/concurrency/run.sh
+
       # Migrations are forward-only and linear (R-MIG-2). A migration edited
       # after it has been applied elsewhere will not show up here, but a
       # migration whose file list disagrees with what the local database

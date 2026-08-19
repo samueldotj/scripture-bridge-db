@@ -12,10 +12,10 @@
 -- crafted xact_id values. That is the mechanism the race depends on, and it
 -- catches the realistic regression (someone removing or weakening the guard).
 --
--- It does NOT reproduce the race itself. A true concurrency test needs two
--- psql connections driven by an external harness, and R-TEST-2's simultaneous
--- -saves test has the same requirement. Both remain owed; see docs/roadmap.md
--- M3. Do not read a green run here as covering them.
+-- It does NOT reproduce the race itself. That lives in
+-- supabase/tests/concurrency/run.sh, which drives two real psql sessions and
+-- covers R-TEST-4 along with R-TEST-2's simultaneous saves. A green run HERE
+-- does not cover either; run the harness too.
 -- ===========================================================================
 
 begin;

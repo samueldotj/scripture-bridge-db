@@ -171,7 +171,9 @@ The three things that can stall this path, in order of likelihood:
 
 - **The out-of-order commit test passes** (DB R-TEST-4): a transaction that takes a lower `seq`
   and commits later is never skipped by a cursor. Constructed deliberately — ordinary use will
-  not find this.
+  not find this. Lives in `supabase/tests/concurrency/run.sh`, which drives two real psql
+  sessions; it carries a control assertion proving the race actually reproduced, so the test
+  cannot pass vacuously.
 - A cursor below the pruning watermark returns `cursor_expired`, not an empty page.
 - Progress reads come from counters, and reconciliation reports zero drift against the scale
   fixture.

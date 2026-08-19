@@ -1,0 +1,48 @@
+-- Teardown for the concurrency harness.
+--
+-- `session_replication_role = replica` suppresses user triggers for this
+-- session. It is the only way to remove the fixture: verse_revision and
+-- audit_log carry append-only guards that correctly refuse DELETE even from the
+-- table owner (R-FN-9, R-AUDIT-2), and verse rows cannot go while revisions
+-- reference them.
+--
+-- That the guards have to be bypassed here is the point of having them. This is
+-- a test-database teardown run as superuser; nothing in the API can do it.
+
+set session_replication_role = replica;
+
+do $$
+declare
+  v_project uuid := (select id from ctest.fixture where name = 'project');
+  v_uid     uuid := (select id from ctest.fixture where name = 'auth_user');
+  v_profile uuid := (select p.id from app.profile p
+                      where p.auth_user_id = (select id from ctest.fixture
+                                               where name = 'auth_user'));
+begin
+  if v_project is null then
+    return;
+  end if;
+
+  delete from app.change_log           where project_id = v_project;
+  delete from app.change_log_watermark where project_id = v_project;
+  delete from app.comment              where project_id = v_project;
+  delete from app.verse_revision       where project_id = v_project;
+  delete from app.verse                where project_id = v_project;
+  delete from app.chapter              where project_id = v_project;
+  delete from app.book                 where project_id = v_project;
+  delete from app.project_member       where project_id = v_project;
+  delete from app.project              where id = v_project;
+
+  if v_profile is not null then
+    delete from app.idempotency_key where profile_id = v_profile;
+    delete from app.audit_log       where actor_profile_id = v_profile;
+    delete from app.profile         where id = v_profile;
+  end if;
+
+  delete from auth.users where id = v_uid;
+end;
+$$;
+
+set session_replication_role = origin;
+
+drop schema if exists ctest cascade;

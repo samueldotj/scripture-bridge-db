@@ -1,0 +1,53 @@
+-- Committed fixture for the concurrency harness.
+--
+-- Committed, not rolled back, because two concurrent sessions must both see it.
+-- Names are prefixed `conc-` so a leftover fixture cannot collide with the
+-- pgTAP suite, which uses alice/bob/carol.
+
+create schema if not exists ctest;
+create table if not exists ctest.fixture (name text primary key, id uuid not null);
+truncate ctest.fixture;
+
+do $$
+declare
+  v_uid     uuid := gen_random_uuid();
+  v_project uuid;
+  v_verse   uuid;
+  v_profile uuid;
+begin
+  insert into auth.users (
+    instance_id, id, aud, role, email, encrypted_password,
+    email_confirmed_at, created_at, updated_at,
+    raw_app_meta_data, raw_user_meta_data)
+  values (
+    '00000000-0000-0000-0000-000000000000', v_uid, 'authenticated', 'authenticated',
+    'conc-writer@example.test', 'hashed:pw', now(), now(), now(),
+    '{"provider":"email"}'::jsonb, '{"display_name":"conc-writer"}'::jsonb);
+
+  -- The profile arrives via the trigger on auth.users. Clear the password gate
+  -- or my_project_ids() returns empty and every write is refused for the wrong
+  -- reason (R-AUTH-DB-8).
+  update app.profile set must_change_password = false where auth_user_id = v_uid;
+  select id into v_profile from app.profile where auth_user_id = v_uid;
+
+  insert into app.project (name, language_name, language_code, script_code,
+                           text_direction, versification_scheme)
+  values ('conc-project', 'Test Language', 'xx', 'Latn', 'ltr', 'eng')
+  returning id into v_project;
+
+  perform app.materialise_book(v_project, 'MAT');
+
+  insert into app.project_member (project_id, profile_id, role)
+  values (v_project, v_profile, 'translator');
+
+  update app.chapter set assigned_translator_id = v_profile
+   where project_id = v_project and number = 1;
+
+  select v.id into v_verse
+    from app.verse v join app.chapter c on c.id = v.chapter_id
+   where v.project_id = v_project and c.number = 1 and v.number = 1;
+
+  insert into ctest.fixture (name, id) values
+    ('auth_user', v_uid), ('project', v_project), ('verse', v_verse);
+end;
+$$;

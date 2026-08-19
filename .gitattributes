@@ -1,0 +1,14 @@
+# Force LF everywhere.
+#
+# This repository is edited on Windows but every consumer of these files runs on
+# Linux: bash in CI, psql in a container, pg_prove. A CRLF shell script fails
+# with `$'\r': command not found`, which is an obscure way to learn that an
+# editor or a Python `write_text()` call silently rewrote the line endings.
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.sql  text eol=lf
+*.psql text eol=lf
+*.toml text eol=lf
+*.yml  text eol=lf
+*.md   text eol=lf

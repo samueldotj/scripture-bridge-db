@@ -235,17 +235,12 @@ cmd_reset_password() {
               -d "$(printf '{"password":"%s"}' "$password")")
   [ -n "$(json_field "$resp" id)" ] || die "password reset failed: $(printf '%s' "$resp" | head -c 300)"
 
-  # Re-arm the forced change and re-fingerprint, or complete_password_change
-  # would compare against a stale value (R-AUTH-DB-7).
-  psql_q "update app.profile
-             set must_change_password = true,
-                 initial_password_fingerprint =
-                   (select md5(coalesce(u.encrypted_password, ''))
-                      from auth.users u where u.id = '$uid')
-           where auth_user_id = '$uid'" >/dev/null
-
-  audit 'profile.password_reset' 'profile' \
-        "$(psql_q "select id from app.profile where auth_user_id = '$uid'")"
+  # Re-arms the forced change, re-fingerprints, and audits - all inside the
+  # console API, so this script and the web console cannot drift apart on a
+  # rule that decides whether a translator is locked out (R-AUTH-DB-7).
+  psql_q "select api.rearm_password_change(
+            (select id from app.profile where auth_user_id = '$uid'),
+            '$(sql_lit "$OPERATOR")')" >/dev/null
   echo "password reset for $email; they must change it at next sign-in"
 }
 

@@ -59,6 +59,11 @@ create table tests.before as
            where author_id = tests.profile_id('alice'))::int              as comments,
          (select text from app.verse where id = (select id from tests.v1)) as verse_text;
 
+-- Read after `set local role authenticated` further down, so it needs the same
+-- grant tests.v1 does. Without it the file dies mid-run with a permission
+-- error rather than a failed assertion, and pg_prove reports "no plan found".
+grant select on tests.before to authenticated;
+
 select ok((select revisions from tests.before) >= 1, 'alice authored at least one revision');
 select ok((select comments  from tests.before) >= 1, 'alice authored at least one comment');
 

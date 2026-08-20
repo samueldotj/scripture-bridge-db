@@ -81,9 +81,22 @@ begin
       jsonb_build_object('chapter_id', v_chapter.id));
   end if;
 
-  if not (v_chapter.assigned_translator_id = app.current_profile_id()
-       or v_chapter.assigned_reviewer_id   = app.current_profile_id()
-       or app.role_in_project(v_verse.project_id) = 'admin') then
+  -- coalesce(..., false) is load-bearing, not defensive noise.
+  --
+  -- On an UNASSIGNED chapter both columns are NULL, so the comparisons yield
+  -- NULL, `NULL or NULL or false` is NULL, `not NULL` is NULL, and `if NULL
+  -- then` does not fire. Without the coalesce this check silently permits any
+  -- project member to write to any chapter nobody has been assigned - a
+  -- three-valued-logic hole that fails OPEN.
+  --
+  -- It went unnoticed in SQL tests because their fixture chapter has an
+  -- assigned translator, making the comparison false rather than NULL. Only an
+  -- unassigned chapter reproduces it.
+  if not coalesce(
+       v_chapter.assigned_translator_id = app.current_profile_id()
+    or v_chapter.assigned_reviewer_id   = app.current_profile_id()
+    or app.role_in_project(v_verse.project_id) = 'admin',
+    false) then
     perform app.error('not_assigned', 403,
       jsonb_build_object('chapter_id', v_chapter.id));
   end if;

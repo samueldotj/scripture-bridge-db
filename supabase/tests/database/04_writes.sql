@@ -160,6 +160,21 @@ select throws_ok(
   'PT403', 'not_assigned',
   'a project member who is not assigned the chapter cannot write to it');
 
+-- An UNASSIGNED chapter, which is the case that fails open under three-valued
+-- logic: with both assignment columns NULL the permission predicate evaluates
+-- to NULL rather than false, and `if not NULL` does not fire. Chapter 2 was
+-- deliberately left unassigned for this.
+select set_config('request.headers', '{"idempotency-key": "test-key-carol-2"}', true);
+select throws_ok(
+  $$ select api.save_verse_text(
+       (select v.id from app.verse v
+          join app.chapter c on c.id = v.chapter_id
+          join app.project p on p.id = v.project_id
+         where p.name = 'P1' and c.number = 2 and v.number = 1),
+       'nobody is assigned here', 'explicit_save') $$,
+  'PT403', 'not_assigned',
+  'a member cannot write to a chapter nobody is assigned to');
+
 reset role;
 
 -- ---------------------------------------------------------------------------

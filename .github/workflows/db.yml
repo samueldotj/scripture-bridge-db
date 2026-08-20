@@ -68,3 +68,37 @@ jobs:
       - name: Service status on failure
         if: failure()
         run: supabase status || true
+
+  e2e:
+    name: full stack, provision and HTTP smoke
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: 2.115.0
+
+      # The full stack, not just Postgres: this job exercises GoTrue and
+      # PostgREST, which is the path the Android app actually takes
+      # (R-TRANSPORT-1). Nothing else in CI covers the gap between the database
+      # and the wire.
+      - name: Start the stack
+        run: bash scripts/ci-run.sh "supabase start" supabase start -x studio,imgproxy,inbucket,realtime,storage-api,edge-runtime,logflare,vector,supavisor
+
+      - name: Reset from zero
+        run: bash scripts/ci-run.sh "supabase db reset" supabase db reset
+
+      # The console stand-in (docs/roadmap.md M1). If this breaks, nobody can
+      # create an account or an assignment, and the app is unusable.
+      - name: Provision a dev project
+        run: bash scripts/ci-run.sh "provision bootstrap" bash scripts/provision.sh bootstrap
+
+      - name: HTTP smoke test
+        run: bash scripts/ci-run.sh "http smoke" bash scripts/smoke-http.sh
+
+      - name: Service status on failure
+        if: failure()
+        run: supabase status || true

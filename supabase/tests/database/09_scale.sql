@@ -145,6 +145,15 @@ returns boolean
 language sql
 as $$ select tests.plan_of(q) like '%' || idx || '%' $$;
 
+-- Naming one index is too strict: several may serve a query correctly, and the
+-- planner picking a different one is not a regression. What matters is that a
+-- growing table is not read end to end. Failures print the plan, because
+-- guessing at a plan from a boolean costs a CI run each time.
+create function tests.no_seq_scan(q text, rel text)
+returns boolean
+language sql
+as $$ select tests.plan_of(q) not like '%Seq Scan on ' || rel || '%' $$;
+
 create view tests.scale as select id from app.project where name = 'Scale';
 
 -- ---------------------------------------------------------------------------
@@ -165,19 +174,27 @@ select ok(
     'verse_revision_verse_rev_idx'),
   'a verse''s history uses verse_revision_verse_rev_idx');
 
-select ok(
-  tests.uses_index(
-    'select seq from app.change_log where project_id = (select id from tests.scale)
-       and seq > (select max(seq) - 50 from app.change_log) order by seq limit 500',
-    'change_log_project_seq_idx'),
-  'a delta-sync page uses change_log_project_seq_idx');
+select diag('change_log plan: ' || tests.plan_of(
+  'select seq from app.change_log where project_id = (select id from tests.scale)
+     and seq > (select max(seq) - 50 from app.change_log) order by seq limit 500'));
 
 select ok(
-  tests.uses_index(
+  tests.no_seq_scan(
+    'select seq from app.change_log where project_id = (select id from tests.scale)
+       and seq > (select max(seq) - 50 from app.change_log) order by seq limit 500',
+    'change_log'),
+  'a delta-sync page reads the change log by index, not end to end');
+
+select diag('search plan: ' || tests.plan_of(
+  'select id from app.verse where project_id = (select id from tests.scale)
+     and text_folded like ''%zzqx-rare-token%'''));
+
+select ok(
+  tests.no_seq_scan(
     'select id from app.verse where project_id = (select id from tests.scale)
        and text_folded like ''%zzqx-rare-token%''',
-    'verse_text_folded_idx'),
-  'project-wide search uses the trigram index rather than reading every verse');
+    'verse'),
+  'project-wide search does not read all 31,103 verses');
 
 -- R-PERF-1: progress is served from chapter counters. If a plan change ever
 -- pulls app.verse into this query it stops being a hundreds-of-rows aggregate

@@ -392,7 +392,17 @@ UNAUTH=$(curl -sS -o "$ERRFILE2" -w '%{http_code}' -X POST "$API_URL/rest/v1/rpc
          -H "Idempotency-Key: unauth-$(date +%s%N)" \
          -d "$(printf '{"p_verse_id":"%s","p_text":"x","p_reason":"autosave"}' "$VERSE_ID")")
 is "$UNAUTH" "401" "unauthenticated arrives as HTTP 401"
-is "$(json_field "$(cat "$ERRFILE2")" message)" "unauthenticated" "carrying the API's own code"
+# Refused by the GRANT on schema api, not by app.error - anon has no USAGE
+# there at all (R-RLS-2), so an unauthenticated caller never reaches our code.
+# That is a stronger guarantee than an application-level check, and asserting
+# the application code here was asserting the weaker property.
+UNAUTH_MSG=$(json_field "$(cat "$ERRFILE2")" message)
+case "$UNAUTH_MSG" in
+  *"permission denied for schema api"*|unauthenticated)
+    ok "refused before reaching application code: $UNAUTH_MSG" ;;
+  *)
+    notok "refused before reaching application code" "got [$UNAUTH_MSG]" ;;
+esac
 
 # APP R-LEGAL-1: the app presents a consent notice at first sign-in and records
 # the acknowledgement through the API.

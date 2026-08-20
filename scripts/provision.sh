@@ -54,6 +54,10 @@ load_config() {
   [ -n "$SERVICE_ROLE_KEY" ] || die "SERVICE_ROLE_KEY not set and 'supabase status' gave none. Is the stack running?"
 }
 
+# Recorded against every console action (R-AUTH-DB-12). Without it the audit
+# trail says "a console did this" and not which coordinator.
+OPERATOR="${OPERATOR:-${USER:-unknown}}@provision.sh"
+
 psql_q() { psql "$DB_URL" -v ON_ERROR_STOP=1 -q -At -c "$1"; }
 
 # Escape a value for embedding in a single-quoted SQL literal.
@@ -121,8 +125,6 @@ cmd_create_project() {
   [ ${#books[@]} -gt 0 ] || books=("MAT")
 
   # Reuse a project of the same name rather than creating a second one.
-  # seed.sql already ships a "Dev Project"; two projects sharing a name made
-  # every later lookup return two rows.
   local pid existing
   existing=$(psql_q "select count(*) from app.project where name = '$(sql_lit "$name")'")
   if [ "${existing:-0}" -gt 1 ]; then
@@ -130,29 +132,35 @@ cmd_create_project() {
   elif [ "${existing:-0}" -eq 1 ]; then
     pid=$(psql_q "select id from app.project where name = '$(sql_lit "$name")' limit 1")
     echo "  project '$name' already exists; reusing" >&2
-  else
-    pid=$(psql_q "insert into app.project
-                    (name, language_name, language_code, script_code,
-                     text_direction, versification_scheme)
-                  values ('$(sql_lit "$name")', '$(sql_lit "$language")', 'xx',
-                          '$(sql_lit "$script")', 'ltr', 'eng')
-                  returning id")
-    [ -n "$pid" ] || die "project creation failed"
+    local b has
+    for b in "${books[@]}"; do
+      has=$(psql_q "select count(*) from app.book where project_id = '$pid' and code = '$(sql_lit "$b")'")
+      if [ "${has:-0}" -eq 0 ]; then
+        psql_q "select app.materialise_book('$pid', '$(sql_lit "$b")')" >/dev/null ||
+          die "could not materialise $b - is its versification seeded?"
+        echo "  materialised $b" >&2
+      else
+        echo "  $b already present" >&2
+      fi
+    done
+    echo "$pid"
+    return
   fi
 
-  local b has
-  for b in "${books[@]}"; do
-    has=$(psql_q "select count(*) from app.book where project_id = '$pid' and code = '$(sql_lit "$b")'")
-    if [ "${has:-0}" -eq 0 ]; then
-      psql_q "select app.materialise_book('$pid', '$(sql_lit "$b")')" >/dev/null ||
-        die "could not materialise $b - is its versification seeded?"
-      echo "  materialised $b" >&2
-    else
-      echo "  $b already present" >&2
-    fi
-  done
+  # api.create_project validates the scheme, materialises the books, and writes
+  # the audit entry. Calling it rather than repeating that SQL here is the whole
+  # point: the console runs the same function, so there is one implementation of
+  # the rules and one place the audit trail is written.
+  local books_sql
+  books_sql=$(printf "'%s'," "${books[@]}")
+  books_sql="array[${books_sql%,}]"
 
-  audit 'project.create' 'project' "$pid" "{\"name\":\"$(sql_lit "$name")\"}"
+  pid=$(psql_q "select (api.create_project(
+                          '$(sql_lit "$name")', '$(sql_lit "$language")', 'xx',
+                          '$(sql_lit "$script")', 'eng', 'ltr',
+                          $books_sql, '$(sql_lit "$OPERATOR")') ->> 'project_id')")
+  [ -n "$pid" ] || die "project creation failed"
+  echo "  materialised ${books[*]}" >&2
   echo "$pid"
 }
 
@@ -177,41 +185,35 @@ profile_id_by_email() {
 
 cmd_add_member() {
   local project="$1" email="$2" role="$3"
-  case "$role" in admin|translator|reviewer) ;; *) die "role must be admin, translator, or reviewer" ;; esac
-
   local pid uid
   pid=$(project_id_by_name "$project") || exit 1
   uid=$(profile_id_by_email "$email") || exit 1
 
-  psql_q "insert into app.project_member (project_id, profile_id, role)
-          values ('$pid', '$uid', '$role')
-          on conflict (project_id, profile_id) do update set role = excluded.role" >/dev/null
-
-  audit 'member.add' 'project' "$pid" "{\"role\":\"$role\"}"
+  psql_q "select api.add_project_member('$pid', '$uid', '$(sql_lit "$role")',
+                                        '$(sql_lit "$OPERATOR")')" >/dev/null     || die "could not add $email as $role"
   echo "added $email to $project as $role"
 }
 
 cmd_assign() {
   local project="$1" book="$2" chapter="$3" translator="$4" reviewer="${5:-}"
-
-  local pid tid rid
+  local pid tid rid cid
   pid=$(project_id_by_name "$project") || exit 1
   tid=$(profile_id_by_email "$translator") || exit 1
   rid=""
   [ -n "$reviewer" ] && { rid=$(profile_id_by_email "$reviewer") || exit 1; }
 
-  local cid
   cid=$(psql_q "select c.id from app.chapter c join app.book b on b.id = c.book_id
                  where b.project_id = '$pid' and b.code = '$(sql_lit "$book")'
                    and c.number = $chapter")
   [ -n "$cid" ] || die "no chapter $book $chapter in project '$project'"
 
-  psql_q "update app.chapter
-             set assigned_translator_id = '$tid'
-               , assigned_reviewer_id = nullif('$rid','')::uuid
-           where id = '$cid'" >/dev/null
-
-  audit 'chapter.assign' 'chapter' "$cid" "{\"book\":\"$(sql_lit "$book")\",\"chapter\":$chapter}"
+  # api.assign_chapter also writes the change-log entry, which the raw UPDATE
+  # here did not - so an assignment made with an older version of this script
+  # never reached the translator's device through delta sync.
+  psql_q "select api.assign_chapter('$cid',
+                                    nullif('$tid','')::uuid,
+                                    nullif('$rid','')::uuid,
+                                    '$(sql_lit "$OPERATOR")')" >/dev/null     || die "could not assign $book $chapter"
   echo "assigned $book $chapter to $translator${reviewer:+ (reviewer: $reviewer)}"
 }
 

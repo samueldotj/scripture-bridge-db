@@ -34,6 +34,19 @@ select ok(
      where r.rolname = 'anon' and setting like 'statement_timeout=%'),
   'the anon role carries one too');
 
+-- The catalogue assertions above only prove the setting is RECORDED on the
+-- role. What matters is whether it takes EFFECT the way PostgREST arrives:
+-- connected as `authenticator`, then assuming `authenticated` via SET ROLE.
+-- Per-role settings are documented as applied at login, so if Postgres did not
+-- also apply them on assumption the API would be silently unbounded while the
+-- catalogue looked correctly configured.
+set local role authenticated;
+
+select is(current_setting('statement_timeout'), '8s',
+          'and the timeout actually takes effect when the role is assumed, which is how PostgREST arrives');
+
+reset role;
+
 -- ---------------------------------------------------------------------------
 -- Font storage (R-STORE-1/2)
 --

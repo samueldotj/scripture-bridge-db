@@ -5,9 +5,10 @@
 # Everything else in this repo tests SQL. This tests the path the Android app
 # actually takes (R-TRANSPORT-1): GoTrue for auth, PostgREST for reads and RPC,
 # with a bearer token and an anon key. It is the only thing that can catch a
-# failure living between Postgres and the wire — `api` not exposed, JWT claims
-# not reaching auth.uid(), an RPC argument name PostgREST cannot bind, or the
-# Idempotency-Key header not arriving as request.headers.
+# failure living between Postgres and the wire - `api` not exposed, JWT claims
+# not reaching auth.uid(), an RPC argument PostgREST cannot bind, the
+# Idempotency-Key header not arriving as request.headers, or a typed error
+# losing its HTTP status on the way out.
 #
 # Expects `scripts/provision.sh bootstrap` to have run first.
 #
@@ -36,21 +37,49 @@ EMAIL="${1:-translator@local.test}"
 INITIAL_PW="${2:-dev-initial-password}"
 NEW_PW="changed-password-9f2a"
 
+# ---------------------------------------------------------------------------
+# JSON extraction
+#
+# Postgres renders jsonb as {"key": value} WITH a space after the colon. Every
+# pattern here tolerates surrounding whitespace: matching '"key":value' finds
+# nothing, yields an empty string, and then compares unequal to everything -
+# a failure that reads like a broken API rather than a broken assertion.
+# ---------------------------------------------------------------------------
+
 json_field() {
   printf '%s' "$1" | grep -oE "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" \
                    | head -1 | sed -E "s/.*:[[:space:]]*\"([^\"]*)\"/\1/"
 }
+json_bool() {
+  printf '%s' "$1" | grep -oE "\"$2\"[[:space:]]*:[[:space:]]*(true|false)" \
+                   | head -1 | grep -oE '(true|false)$'
+}
+json_int() {
+  printf '%s' "$1" | grep -oE "\"$2\"[[:space:]]*:[[:space:]]*-?[0-9]+" \
+                   | head -1 | grep -oE -- '-?[0-9]+$'
+}
 count_of() { printf '%s' "$1" | grep -o "\"$2\"" | wc -l | tr -d ' '; }
+
+sign_in() {
+  curl -sS -X POST "$API_URL/auth/v1/token?grant_type=password" \
+       -H "apikey: $ANON_KEY" -H 'Content-Type: application/json' \
+       -d "$(printf '{"email":"%s","password":"%s"}' "$EMAIL" "$1")"
+}
 
 # ---------------------------------------------------------------------------
 echo "# sign-in and the forced password change (R-AUTH-DB-7/8)"
 # ---------------------------------------------------------------------------
 
-LOGIN=$(curl -sS -X POST "$API_URL/auth/v1/token?grant_type=password" \
-             -H "apikey: $ANON_KEY" -H 'Content-Type: application/json' \
-             -d "$(printf '{"email":"%s","password":"%s"}' "$EMAIL" "$INITIAL_PW")")
+LOGIN=$(sign_in "$INITIAL_PW")
 TOKEN=$(json_field "$LOGIN" access_token)
-REFRESH=$(json_field "$LOGIN" refresh_token)
+FRESH_ACCOUNT=1
+if [ -z "$TOKEN" ]; then
+  # Already run against this database, so the password is the changed one.
+  # Keeps the test re-runnable locally, where the database is not reset first.
+  LOGIN=$(sign_in "$NEW_PW")
+  TOKEN=$(json_field "$LOGIN" access_token)
+  FRESH_ACCOUNT=0
+fi
 
 if [ -n "$TOKEN" ]; then
   ok "sign-in with the provisioned password returns an access token"
@@ -60,34 +89,48 @@ else
   echo "1..$TESTS"; exit 1
 fi
 
-auth_get()  { curl -sS "$API_URL/rest/v1/$1" -H "apikey: $ANON_KEY" -H "Authorization: Bearer $TOKEN"; }
-auth_rpc()  { curl -sS -X POST "$API_URL/rest/v1/rpc/$1" -H "apikey: $ANON_KEY" \
-                   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-                   ${3:+-H "Idempotency-Key: $3"} -d "$2"; }
+auth_get() { curl -sS "$API_URL/rest/v1/$1" -H "apikey: $ANON_KEY" -H "Authorization: Bearer $TOKEN"; }
+auth_rpc() { curl -sS -X POST "$API_URL/rest/v1/rpc/$1" -H "apikey: $ANON_KEY" \
+                  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+                  ${3:+-H "Idempotency-Key: $3"} -d "$2"; }
 
-ME=$(auth_rpc me '{}')
-is "$(printf '%s' "$ME" | grep -o '"must_change_password":true' | head -1)" \
-   '"must_change_password":true' "rpc/me reports the forced-change flag"
+if [ "$FRESH_ACCOUNT" -eq 1 ]; then
+  ME=$(auth_rpc me '{}')
+  is "$(json_bool "$ME" must_change_password)" "true" "rpc/me reports the forced-change flag"
 
-# The gate is in RLS, not in app navigation: project data must be unreachable
-# even though the account is a member.
-GATED=$(auth_get 'project?select=id')
-is "$(count_of "$GATED" id)" "0" "no project is readable while the password gate is closed"
+  # The gate lives in RLS, not in app navigation: project data must be
+  # unreachable even though the account is a member.
+  GATED=$(auth_get 'project?select=id')
+  is "$(count_of "$GATED" id)" "0" "no project is readable while the password gate is closed"
 
-# The real flow the app performs.
-CHANGED=$(curl -sS -X PUT "$API_URL/auth/v1/user" \
-               -H "apikey: $ANON_KEY" -H "Authorization: Bearer $TOKEN" \
-               -H 'Content-Type: application/json' \
-               -d "$(printf '{"password":"%s"}' "$NEW_PW")")
-if [ -n "$(json_field "$CHANGED" id)" ]; then
-  ok "the user can change their own password"
+  CHANGED=$(curl -sS -X PUT "$API_URL/auth/v1/user" \
+                 -H "apikey: $ANON_KEY" -H "Authorization: Bearer $TOKEN" \
+                 -H 'Content-Type: application/json' \
+                 -d "$(printf '{"password":"%s"}' "$NEW_PW")")
+  if [ -n "$(json_field "$CHANGED" id)" ]; then
+    ok "the user can change their own password"
+  else
+    notok "the user can change their own password" "$(printf '%s' "$CHANGED" | head -c 200)"
+  fi
+
+  COMPLETE=$(auth_rpc complete_password_change '{}')
+  is "$(json_bool "$COMPLETE" must_change_password)" "false" \
+     "complete_password_change clears the flag once the password really changed"
 else
-  notok "the user can change their own password" "$(printf '%s' "$CHANGED" | head -c 200)"
+  echo "# account already past the password gate; skipping the gate assertions"
 fi
 
-COMPLETE=$(auth_rpc complete_password_change '{}')
-is "$(printf '%s' "$COMPLETE" | grep -o '"must_change_password":false' | head -1)" \
-   '"must_change_password":false' "complete_password_change clears the flag once the password really changed"
+# Changing a password revokes existing refresh tokens, so the session from
+# before it cannot be renewed. Re-authenticate and carry the new pair forward.
+RELOGIN=$(sign_in "$NEW_PW")
+TOKEN=$(json_field "$RELOGIN" access_token)
+REFRESH=$(json_field "$RELOGIN" refresh_token)
+if [ -n "$TOKEN" ]; then
+  ok "signing in again with the changed password works"
+else
+  notok "signing in again with the changed password works" "$(printf '%s' "$RELOGIN" | head -c 200)"
+  echo "1..$TESTS"; exit 1
+fi
 
 # ---------------------------------------------------------------------------
 echo "# reads through PostgREST (R-TRANSPORT-1, R-SCHEMA-2)"
@@ -110,94 +153,108 @@ else
   echo "1..$TESTS"; exit 1
 fi
 
-# `app` is not an exposed schema, so its tables must be unreachable over HTTP
-# even though the caller holds a valid token (R-SCHEMA-2).
-RAW=$(curl -sS -o /dev/null -w '%{http_code}' "$API_URL/rest/v1/verse_revision?select=id" \
-           -H "apikey: $ANON_KEY" -H "Authorization: Bearer $TOKEN")
-if [ "$RAW" = "200" ]; then
-  ok "api.verse_revision is exposed (base tables in app remain unreachable by name)"
-else
-  ok "verse_revision is not directly reachable (HTTP $RAW)"
-fi
+REVREAD=$(curl -sS -o /dev/null -w '%{http_code}' "$API_URL/rest/v1/verse_revision?select=id&limit=1" \
+               -H "apikey: $ANON_KEY" -H "Authorization: Bearer $TOKEN")
+is "$REVREAD" "200" "the revision view is reachable through the api schema"
 
 # ---------------------------------------------------------------------------
 echo "# writes and idempotency over HTTP (R-IDEM-1)"
 # ---------------------------------------------------------------------------
 
-KEY="smoke-$(date +%s)-aaaa"
+STARTING_REV=$(psql "$DB_URL" -At -c "select rev from app.verse where id = '$VERSE_ID'" 2>/dev/null)
+KEY="smoke-key-$(date +%s%N)"
 SAVE=$(auth_rpc save_verse_text \
        "$(printf '{"p_verse_id":"%s","p_text":"smoke test text","p_reason":"explicit_save"}' "$VERSE_ID")" \
        "$KEY")
-is "$(printf '%s' "$SAVE" | grep -o '"rev":[0-9]*' | head -1)" '"rev":1' \
-   "save_verse_text over HTTP sets rev to 1"
-is "$(printf '%s' "$SAVE" | grep -o '"revision_captured":true' | head -1)" \
-   '"revision_captured":true' "the first write captures a revision"
+is "$(json_int "$SAVE" rev)" "$((STARTING_REV + 1))" "save_verse_text over HTTP advances rev by one"
+is "$(json_bool "$SAVE" revision_captured)" "true" "an explicit save captures a revision"
 
-# Same key, same body: the Idempotency-Key header must have arrived as
+BEFORE_REPLAY=$(psql "$DB_URL" -At -c "select count(*) from app.verse_revision where verse_id = '$VERSE_ID'" 2>/dev/null)
+
+# Same key, same body. The Idempotency-Key header must have arrived as
 # request.headers, or this performs the write a second time.
 REPLAY=$(auth_rpc save_verse_text \
          "$(printf '{"p_verse_id":"%s","p_text":"smoke test text","p_reason":"explicit_save"}' "$VERSE_ID")" \
          "$KEY")
-is "$(printf '%s' "$REPLAY" | grep -o '"rev":[0-9]*' | head -1)" '"rev":1' \
+is "$(json_int "$REPLAY" rev)" "$((STARTING_REV + 1))" \
    "replaying the key returns the stored response rather than writing again"
 
-REVS=$(psql "$DB_URL" -At -c "select count(*) from app.verse_revision where verse_id = '$VERSE_ID'" 2>/dev/null)
-is "${REVS:-x}" "1" "the replay created no second revision (APP R-OFF-4)"
+AFTER_REPLAY=$(psql "$DB_URL" -At -c "select count(*) from app.verse_revision where verse_id = '$VERSE_ID'" 2>/dev/null)
+is "$AFTER_REPLAY" "$BEFORE_REPLAY" "the replay created no second revision (APP R-OFF-4)"
 
 # ---------------------------------------------------------------------------
 echo "# typed errors reach the wire with the right HTTP status (R-ERR-1)"
 #
 # DB 11.2 maps SQLSTATE PT<nnn> to HTTP <nnn>, and PostgREST performs that
-# mapping. It cannot be verified in SQL: pgTAP sees the SQLSTATE, not the
-# status the app will branch on. If the mapping breaks, every typed refusal
-# arrives as a 500 and the app treats it as retryable-unknown, holding the
-# write in its outbox forever (APP R-API-12).
+# mapping. It cannot be verified in SQL: pgTAP sees the SQLSTATE, not the status
+# the app branches on. If the mapping broke, every typed refusal would arrive as
+# a 500 and the app would treat it as retryable-unknown, holding the write in
+# its outbox forever (APP R-API-12).
 # ---------------------------------------------------------------------------
 
-# status_and_code <expected-status> <expected-code> <rpc> <json-body> [idempotency-key]
+ERRFILE=$(mktemp)
+
+# status_and_code <expected-status> <expected-code> <rpc> <json-body> [key]
 status_and_code() {
   local want_status="$1" want_code="$2" rpc="$3" body="$4" key="${5:-}"
-  local out status code
-  out=$(curl -sS -o /tmp/err.json -w '%{http_code}' -X POST "$API_URL/rest/v1/rpc/$rpc"         -H "apikey: $ANON_KEY" -H "Authorization: Bearer $TOKEN"         -H 'Content-Type: application/json'         ${key:+-H "Idempotency-Key: $key"} -d "$body")
-  status="$out"
-  code=$(json_field "$(cat /tmp/err.json)" message)
+  local status code
+  status=$(curl -sS -o "$ERRFILE" -w '%{http_code}' -X POST "$API_URL/rest/v1/rpc/$rpc" \
+           -H "apikey: $ANON_KEY" -H "Authorization: Bearer $TOKEN" \
+           -H 'Content-Type: application/json' \
+           ${key:+-H "Idempotency-Key: $key"} -d "$body")
+  code=$(json_field "$(cat "$ERRFILE")" message)
   if [ "$status" = "$want_status" ] && [ "$code" = "$want_code" ]; then
     ok "$want_code arrives as HTTP $want_status"
   else
-    notok "$want_code arrives as HTTP $want_status" "got status=$status code=$code"
+    notok "$want_code arrives as HTTP $want_status" \
+          "got status=$status code=[$code] body=$(head -c 160 "$ERRFILE")"
   fi
 }
 
-VERSE_BODY=$(printf '{"p_verse_id":"%s","p_text":"x","p_reason":"explicit_save"}' "$VERSE_ID")
+VERSE_BODY=$(printf '{"p_verse_id":"%s","p_text":"error probe","p_reason":"explicit_save"}' "$VERSE_ID")
 
-# 400: no Idempotency-Key header at all (R-IDEM-6).
 status_and_code 400 idempotency_key_required save_verse_text "$VERSE_BODY"
 
-# 400: a reason the server does not recognise.
-status_and_code 400 invalid_argument save_verse_text   "$(printf '{"p_verse_id":"%s","p_text":"x","p_reason":"nonsense"}' "$VERSE_ID")"   "err-key-$(date +%s)-a"
+status_and_code 400 invalid_argument save_verse_text \
+  "$(printf '{"p_verse_id":"%s","p_text":"x","p_reason":"nonsense"}' "$VERSE_ID")" \
+  "errkey-a-$(date +%s%N)"
 
-# 422: decomposed text. The literal is e + U+0301, written as an escape so an
-# editor cannot silently turn it into precomposed U+00E9, which is already NFC.
-NFD=$(printf 'eÌclair')
-status_and_code 422 text_not_normalized save_verse_text   "$(printf '{"p_verse_id":"%s","p_text":"%s","p_reason":"explicit_save"}' "$VERSE_ID" "$NFD")"   "err-key-$(date +%s)-b"
+# The decomposed literal is produced by Postgres rather than by a shell escape:
+# U&'\0065\0301clair' is 'e' + U+0301 COMBINING ACUTE, is pure ASCII in this
+# file, and cannot be mangled by an editor the way \xCC\x81 was, twice.
+NFD=$(psql "$DB_URL" -At -c "select U&'\0065\0301clair'" 2>/dev/null)
+status_and_code 422 text_not_normalized save_verse_text \
+  "$(printf '{"p_verse_id":"%s","p_text":"%s","p_reason":"explicit_save"}' "$VERSE_ID" "$NFD")" \
+  "errkey-b-$(date +%s%N)"
 
-# 422: flagging without a comment (R-REVIEW-2).
-status_and_code 422 comment_required flag_verse   "$(printf '{"p_verse_id":"%s","p_body":"  "}' "$VERSE_ID")"   "err-key-$(date +%s)-c"
+status_and_code 422 comment_required flag_verse \
+  "$(printf '{"p_verse_id":"%s","p_body":"  "}' "$VERSE_ID")" \
+  "errkey-c-$(date +%s%N)"
 
-# 403: a chapter this user is not assigned. Chapter 2 was never assigned.
-OTHER_VERSE=$(psql "$DB_URL" -At -c "select v.id from app.verse v join app.chapter c on c.id = v.chapter_id join app.book b on b.id = c.book_id join app.project p on p.id = b.project_id where p.name = 'Dev Project' and c.number = 2 and v.number = 1" 2>/dev/null)
+# A chapter this user is not assigned. Chapter 2 was never assigned.
+OTHER_VERSE=$(psql "$DB_URL" -At -c "select v.id from app.verse v
+                join app.chapter c on c.id = v.chapter_id
+               where c.project_id = (select project_id from app.chapter where id = '$CHAPTER_ID')
+                 and c.number = 2 and v.number = 1" 2>/dev/null)
 if [ -n "$OTHER_VERSE" ]; then
-  status_and_code 403 not_assigned save_verse_text     "$(printf '{"p_verse_id":"%s","p_text":"x","p_reason":"explicit_save"}' "$OTHER_VERSE")"     "err-key-$(date +%s)-d"
+  status_and_code 403 not_assigned save_verse_text \
+    "$(printf '{"p_verse_id":"%s","p_text":"x","p_reason":"explicit_save"}' "$OTHER_VERSE")" \
+    "errkey-d-$(date +%s%N)"
 else
   notok "not_assigned arrives as HTTP 403" "could not find an unassigned verse"
 fi
 
-# 409: an approved chapter is the ONLY condition under which a text write is
-# refused (R-API-11). Set directly, because reaching approval legitimately
-# needs all 25 verses filled and reviewed.
-psql "$DB_URL" -q -c "update app.chapter set workflow_state='approved', approved_at=now(), approved_by_id=(select assigned_reviewer_id from app.chapter where id='$CHAPTER_ID') where id='$CHAPTER_ID'" >/dev/null 2>&1
-status_and_code 409 chapter_locked save_verse_text "$VERSE_BODY" "err-key-$(date +%s)-e"
-psql "$DB_URL" -q -c "update app.chapter set workflow_state='in_progress', approved_at=null, approved_by_id=null where id='$CHAPTER_ID'" >/dev/null 2>&1
+# An approved chapter is the ONLY condition under which a text write is refused
+# (R-API-11). Set directly, because reaching approval legitimately needs all 25
+# verses filled and reviewed.
+psql "$DB_URL" -q -c "update app.chapter set workflow_state='approved', approved_at=now(),
+                        approved_by_id=coalesce(assigned_reviewer_id, assigned_translator_id)
+                      where id='$CHAPTER_ID'" >/dev/null 2>&1
+status_and_code 409 chapter_locked save_verse_text "$VERSE_BODY" "errkey-e-$(date +%s%N)"
+psql "$DB_URL" -q -c "update app.chapter set workflow_state='in_progress', approved_at=null,
+                        approved_by_id=null where id='$CHAPTER_ID'" >/dev/null 2>&1
+
+rm -f "$ERRFILE"
 
 # ---------------------------------------------------------------------------
 echo "# the anon key alone is worth nothing (R-RLS-2)"
@@ -207,16 +264,17 @@ ANONREAD=$(curl -sS "$API_URL/rest/v1/project?select=id" -H "apikey: $ANON_KEY")
 is "$(count_of "$ANONREAD" id)" "0" "the anon key reads no project data"
 
 ANONWRITE=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API_URL/rest/v1/rpc/save_verse_text" \
-            -H "apikey: $ANON_KEY" -H 'Content-Type: application/json' -H "Idempotency-Key: $KEY-anon" \
+            -H "apikey: $ANON_KEY" -H 'Content-Type: application/json' \
+            -H "Idempotency-Key: anonkey-$(date +%s%N)" \
             -d "$(printf '{"p_verse_id":"%s","p_text":"anon","p_reason":"autosave"}' "$VERSE_ID")")
 if [ "$ANONWRITE" != "200" ]; then
   ok "the anon key cannot write (HTTP $ANONWRITE)"
 else
-  notok "the anon key cannot write" "got HTTP 200 — an unauthenticated write succeeded"
+  notok "the anon key cannot write" "got HTTP 200 - an unauthenticated write succeeded"
 fi
 
 # ---------------------------------------------------------------------------
-echo "# token refresh survives (APP R-AUTH-5)"
+echo "# token refresh (APP R-AUTH-5)"
 # ---------------------------------------------------------------------------
 
 RENEW=$(curl -sS -X POST "$API_URL/auth/v1/token?grant_type=refresh_token" \

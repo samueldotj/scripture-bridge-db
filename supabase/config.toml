@@ -73,7 +73,20 @@ enable_signup = false
 enable_anonymous_sign_ins = false
 
 [auth.email]
-enable_signup = false
+# TRUE, deliberately. This key is misleadingly named and cost a CI run.
+#
+# [auth.email].enable_signup does NOT gate signups. It maps to GoTrue's
+# EXTERNAL_EMAIL_ENABLED (apps/cli-go/pkg/config/auth.go:
+#   body.ExternalEmailEnabled = e.EnableSignup)
+# which gates whether the email provider works AT ALL. Setting it false makes
+# every email sign-in fail with "Email logins are disabled" - including
+# admin-provisioned accounts, which are the only kind this project has
+# (R-AUTH-DB-5). It would have locked every translator out of the pilot.
+#
+# Self-registration is blocked by [auth].enable_signup above, which maps to
+# GoTrue's DisableSignup. That is the one R-AUTH-DB-1 needs.
+enable_signup = true
+
 # Accounts are created with email_confirm = true by the console (R-AUTH-DB-5).
 enable_confirmations = false
 double_confirm_changes = true

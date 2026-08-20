@@ -453,6 +453,13 @@ app.can_edit_verse(verse uuid)    -- membership + assignment + chapter not appro
 - **R-AUTH-DB-1. Self-registration is disabled** (`disable_signup`; dashboard: Authentication →
   Providers → Email → "Allow new users to sign up" off). APP R-API-9 makes this an assumption
   the app relies on and does not compensate for.
+  **Two different settings share the name `enable_signup`, and only one of them means this.**
+  The top-level `[auth].enable_signup` maps to GoTrue's `DisableSignup` and is the correct
+  control. The per-provider `[auth.email].enable_signup` maps to `EXTERNAL_EMAIL_ENABLED` and
+  must stay **true**: setting it false disables email authentication entirely, so every
+  administrator-provisioned account fails to sign in with "Email logins are disabled". Since
+  admin provisioning is the only way accounts exist here, that setting would lock out the whole
+  cohort, and it would look like a credential problem rather than a configuration one.
 - **R-AUTH-DB-2.** Email/password is the only enabled provider. No OAuth, no magic link, no
   phone/SMS (APP R-AUTH-1, and R-LEGAL-3's registration lead time is thereby avoided).
 - **R-AUTH-DB-3.** Email confirmation is irrelevant because accounts are created pre-confirmed

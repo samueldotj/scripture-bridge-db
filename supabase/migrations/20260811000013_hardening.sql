@@ -13,6 +13,25 @@
 -- migrations, the console, and the pruning jobs are unaffected.
 -- ---------------------------------------------------------------------------
 
+-- The role that MATTERS here is `authenticator`, not `authenticated`.
+--
+-- PostgREST logs in as authenticator and then assumes authenticated with SET
+-- ROLE. Postgres applies per-role settings at LOGIN and does not re-apply them
+-- on assumption, so a timeout set only on `authenticated` is inert for every
+-- API request - the catalogue reads as configured while the API stays
+-- unbounded. Verified: 08_hardening.sql asserts the effective value and caught
+-- exactly this.
+--
+-- The settings on authenticated and anon are kept for any client that connects
+-- as those roles directly, but authenticator is what covers the API.
+do $$
+begin
+  if exists (select 1 from pg_roles where rolname = 'authenticator') then
+    execute 'alter role authenticator set statement_timeout = ''8s''';
+  end if;
+end;
+$$;
+
 alter role authenticated set statement_timeout = '8s';
 alter role anon          set statement_timeout = '5s';
 

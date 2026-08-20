@@ -84,11 +84,35 @@ select v.id, v.project_id, g.n, 'revision ' || g.n::text, null
  where v.project_id = (select id from app.project where name = 'Scale')
    and v.number <= 3;
 
+-- Two projects' worth of traffic, because a filter that matches every row is
+-- not a filter: with a single project the planner correctly prefers a scan and
+-- the index assertion below would fail while nothing was wrong.
+insert into app.project (name, language_name, language_code, script_code,
+                         text_direction, versification_scheme)
+values ('Scale Neighbour', 'Test Language', 'xx', 'Latn', 'ltr', 'eng');
+
 insert into app.change_log (project_id, entity_type, entity_id, op, payload)
 select v.project_id, 'verse', v.id, 'update', '{}'::jsonb
   from app.verse v
  where v.project_id = (select id from app.project where name = 'Scale')
    and v.number <= 2;
+
+insert into app.change_log (project_id, entity_type, entity_id, op, payload)
+select (select id from app.project where name = 'Scale Neighbour'),
+       'verse', v.id, 'update', '{}'::jsonb
+  from app.verse v
+ where v.project_id = (select id from app.project where name = 'Scale')
+   and v.number <= 2;
+
+-- A rare token, so search selectivity resembles a translator looking for a
+-- term rather than matching a tenth of the Bible.
+update app.verse
+   set text = text || ' zzqx-rare-token'
+ where project_id = (select id from app.project where name = 'Scale')
+   and number = 1
+   and chapter_id in (select id from app.chapter
+                       where project_id = (select id from app.project where name = 'Scale')
+                       limit 5);
 
 -- Without stats the planner has no reason to prefer an index, and every
 -- assertion below would fail for the wrong reason.
@@ -144,14 +168,14 @@ select ok(
 select ok(
   tests.uses_index(
     'select seq from app.change_log where project_id = (select id from tests.scale)
-       and seq > 0 order by seq limit 500',
+       and seq > (select max(seq) - 50 from app.change_log) order by seq limit 500',
     'change_log_project_seq_idx'),
   'a delta-sync page uses change_log_project_seq_idx');
 
 select ok(
   tests.uses_index(
     'select id from app.verse where project_id = (select id from tests.scale)
-       and text_folded like ''%beginning%''',
+       and text_folded like ''%zzqx-rare-token%''',
     'verse_text_folded_idx'),
   'project-wide search uses the trigram index rather than reading every verse');
 

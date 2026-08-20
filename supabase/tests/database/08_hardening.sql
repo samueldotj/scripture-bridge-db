@@ -40,12 +40,25 @@ select ok(
 -- Per-role settings are documented as applied at login, so if Postgres did not
 -- also apply them on assumption the API would be silently unbounded while the
 -- catalogue looked correctly configured.
+-- Postgres applies per-role settings at LOGIN and does NOT re-apply them on
+-- SET ROLE. An earlier version of this file asserted the opposite and failed
+-- with have: 0, want: 8s - which is the whole reason the setting also has to
+-- exist on `authenticator`, the role PostgREST actually logs in as.
 set local role authenticated;
 
-select is(current_setting('statement_timeout'), '8s',
-          'and the timeout actually takes effect when the role is assumed, which is how PostgREST arrives');
+select is(current_setting('statement_timeout'), '0',
+          'assuming a role does NOT pick up its statement_timeout, which is why authenticator carries one');
 
 reset role;
+
+select ok(
+  not exists (select 1 from pg_roles where rolname = 'authenticator')
+  or exists (
+    select 1 from pg_db_role_setting s
+      join pg_roles r on r.oid = s.setrole
+     cross join lateral unnest(s.setconfig) as setting
+     where r.rolname = 'authenticator' and setting like 'statement_timeout=%'),
+  'authenticator carries the timeout, so API requests are actually bounded');
 
 -- ---------------------------------------------------------------------------
 -- Font storage (R-STORE-1/2)

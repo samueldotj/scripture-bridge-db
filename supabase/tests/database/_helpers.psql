@@ -21,6 +21,13 @@ grant usage on schema tests to authenticated;
 -- Fixture ids, so tests can refer to actors by name after switching roles.
 create table tests.ids (name text primary key, id uuid not null);
 
+-- Readable after `set local role authenticated`. This is the third time a test
+-- has died on a missing grant to a fixture object rather than failing an
+-- assertion - and pg_prove reports a file that DIES as "no plan found", so the
+-- run goes red without naming what broke. Anything created here that a test may
+-- touch after switching roles is granted at the point it is created.
+grant select on tests.ids to authenticated;
+
 -- ---------------------------------------------------------------------------
 -- Impersonation
 --
@@ -42,6 +49,7 @@ create table tests.ids (name text primary key, id uuid not null);
 create function tests.jwt(p_name text)
 returns text
 language sql
+security definer
 as $$
   select json_build_object(
            'sub',  (select id::text from tests.ids where name = p_name),
@@ -95,6 +103,7 @@ $$;
 create function tests.profile_id(p_name text)
 returns uuid
 language sql
+security definer
 as $$
   select p.id from app.profile p
    where p.auth_user_id = (select id from tests.ids where name = p_name);

@@ -95,7 +95,13 @@ cmd_create_user() {
 
   local uid
   uid=$(json_field "$resp" id)
-  [ -n "$uid" ] || die "user creation failed: $(printf '%s' "$resp" | head -c 300)"
+  if [ -z "$uid" ]; then
+    # Most likely already provisioned. Adopt the existing account instead of
+    # failing, so bootstrap can be re-run against a partly-populated database.
+    uid=$(psql_q "select id from auth.users where email = '$(sql_lit "$email")'")
+    [ -n "$uid" ] || die "user creation failed: $(printf '%s' "$resp" | head -c 300)"
+    echo "  user $email already exists; reusing" >&2
+  fi
 
   # The profile arrives via the trigger on auth.users (R-AUTH-DB-6).
   # must_change_password stays TRUE: the out-of-band password is known to at
@@ -114,39 +120,59 @@ cmd_create_project() {
   local books=("$@")
   [ ${#books[@]} -gt 0 ] || books=("MAT")
 
-  local pid
-  pid=$(psql_q "insert into app.project
-                  (name, language_name, language_code, script_code,
-                   text_direction, versification_scheme)
-                values ('$(sql_lit "$name")', '$(sql_lit "$language")', 'xx',
-                        '$(sql_lit "$script")', 'ltr', 'eng')
-                returning id")
-  [ -n "$pid" ] || die "project creation failed"
+  # Reuse a project of the same name rather than creating a second one.
+  # seed.sql already ships a "Dev Project"; two projects sharing a name made
+  # every later lookup return two rows.
+  local pid existing
+  existing=$(psql_q "select count(*) from app.project where name = '$(sql_lit "$name")'")
+  if [ "${existing:-0}" -gt 1 ]; then
+    die "several projects are named '$name'; this script needs the name to identify one"
+  elif [ "${existing:-0}" -eq 1 ]; then
+    pid=$(psql_q "select id from app.project where name = '$(sql_lit "$name")' limit 1")
+    echo "  project '$name' already exists; reusing" >&2
+  else
+    pid=$(psql_q "insert into app.project
+                    (name, language_name, language_code, script_code,
+                     text_direction, versification_scheme)
+                  values ('$(sql_lit "$name")', '$(sql_lit "$language")', 'xx',
+                          '$(sql_lit "$script")', 'ltr', 'eng')
+                  returning id")
+    [ -n "$pid" ] || die "project creation failed"
+  fi
 
-  local b
+  local b has
   for b in "${books[@]}"; do
-    psql_q "select app.materialise_book('$pid', '$(sql_lit "$b")')" >/dev/null \
-      || die "could not materialise $b — is its versification seeded?"
-    echo "  materialised $b" >&2
+    has=$(psql_q "select count(*) from app.book where project_id = '$pid' and code = '$(sql_lit "$b")'")
+    if [ "${has:-0}" -eq 0 ]; then
+      psql_q "select app.materialise_book('$pid', '$(sql_lit "$b")')" >/dev/null ||
+        die "could not materialise $b - is its versification seeded?"
+      echo "  materialised $b" >&2
+    else
+      echo "  $b already present" >&2
+    fi
   done
 
   audit 'project.create' 'project' "$pid" "{\"name\":\"$(sql_lit "$name")\"}"
   echo "$pid"
 }
 
+# psql -At prints one line per row, so an ambiguous lookup silently produced two
+# UUIDs joined by a newline and the failure surfaced far from its cause. These
+# refuse anything but exactly one match.
 project_id_by_name() {
-  local id
-  id=$(psql_q "select id from app.project where name = '$(sql_lit "$1")'")
-  [ -n "$id" ] || die "no project named '$1'"
-  echo "$id"
+  local n
+  n=$(psql_q "select count(*) from app.project where name = '$(sql_lit "$1")'")
+  [ "${n:-0}" -eq 1 ] || die "expected exactly one project named '$1', found ${n:-0}"
+  psql_q "select id from app.project where name = '$(sql_lit "$1")' limit 1"
 }
 
 profile_id_by_email() {
-  local id
-  id=$(psql_q "select p.id from app.profile p join auth.users u on u.id = p.auth_user_id
-                where u.email = '$(sql_lit "$1")'")
-  [ -n "$id" ] || die "no user with email '$1'"
-  echo "$id"
+  local n
+  n=$(psql_q "select count(*) from app.profile p join auth.users u on u.id = p.auth_user_id
+               where u.email = '$(sql_lit "$1")'")
+  [ "${n:-0}" -eq 1 ] || die "expected exactly one user with email '$1', found ${n:-0}"
+  psql_q "select p.id from app.profile p join auth.users u on u.id = p.auth_user_id
+           where u.email = '$(sql_lit "$1")' limit 1"
 }
 
 cmd_add_member() {

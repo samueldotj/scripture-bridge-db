@@ -254,6 +254,74 @@ status_and_code 409 chapter_locked save_verse_text "$VERSE_BODY" "errkey-e-$(dat
 psql "$DB_URL" -q -c "update app.chapter set workflow_state='in_progress', approved_at=null,
                         approved_by_id=null where id='$CHAPTER_ID'" >/dev/null 2>&1
 
+
+# 404: a verse that does not exist.
+status_and_code 404 not_found save_verse_text   '{"p_verse_id":"00000000-0000-0000-0000-000000000000","p_text":"x","p_reason":"explicit_save"}'   "errkey-f-$(date +%s%N)"
+
+# 409: the same key carrying a different body (R-IDEM-3). Answering the second
+# request with the first one's response would be worse than refusing it: the
+# client would believe a write it never made had landed.
+REUSE_KEY="errkey-g-$(date +%s%N)"
+auth_rpc save_verse_text   "$(printf '{"p_verse_id":"%s","p_text":"first body","p_reason":"explicit_save"}' "$VERSE_ID")"   "$REUSE_KEY" >/dev/null
+status_and_code 409 idempotency_key_reuse save_verse_text   "$(printf '{"p_verse_id":"%s","p_text":"second body","p_reason":"explicit_save"}' "$VERSE_ID")"   "$REUSE_KEY"
+
+# 403: a project the caller is not a member of.
+status_and_code 403 forbidden changes_since   '{"p_project_id":"00000000-0000-0000-0000-000000000000"}'
+
+# 422: marking an empty verse done would let the chapter pass the "no empty
+# verses" check on submit, because that check reads status rather than text.
+EMPTY_VERSE=$(psql "$DB_URL" -At -c "select id from app.verse where chapter_id = '$CHAPTER_ID' and text = '' order by number limit 1" 2>/dev/null)
+status_and_code 422 verse_empty set_verse_status   "$(printf '{"p_verse_id":"%s","p_status":"done"}' "$EMPTY_VERSE")"   "errkey-h-$(date +%s%N)"
+
+# 422: submitting a chapter that still has empty verses (R-WF-1).
+status_and_code 422 chapter_not_ready submit_chapter   "$(printf '{"p_chapter_id":"%s"}' "$CHAPTER_ID")"   "errkey-i-$(date +%s%N)"
+
+# 410: a cursor stranded by pruning must expire, not return an empty page.
+PROJECT_ID=$(psql "$DB_URL" -At -c "select project_id from app.chapter where id = '$CHAPTER_ID'" 2>/dev/null)
+psql "$DB_URL" -q -c "insert into app.change_log_watermark (project_id, pruned_through_seq) values ('$PROJECT_ID', 500) on conflict (project_id) do update set pruned_through_seq = 500" >/dev/null 2>&1
+STALE_CURSOR=$(psql "$DB_URL" -At -c "select app.encode_cursor('$PROJECT_ID', 499)" 2>/dev/null)
+status_and_code 410 cursor_expired changes_since   "$(printf '{"p_project_id":"%s","p_cursor":"%s"}' "$PROJECT_ID" "$STALE_CURSOR")"
+psql "$DB_URL" -q -c "delete from app.change_log_watermark where project_id = '$PROJECT_ID'" >/dev/null 2>&1
+
+# The reviewer account is still behind the password gate, which bootstrap
+# leaves in place - so it is the natural fixture for the two codes that only
+# a gated account can produce.
+REV_LOGIN=$(curl -sS -X POST "$API_URL/auth/v1/token?grant_type=password"             -H "apikey: $ANON_KEY" -H 'Content-Type: application/json'             -d "$(printf '{"email":"reviewer@local.test","password":"%s"}' "$INITIAL_PW")")
+REV_TOKEN=$(json_field "$REV_LOGIN" access_token)
+if [ -n "$REV_TOKEN" ]; then
+  SAVED_TOKEN="$TOKEN"
+  TOKEN="$REV_TOKEN"
+  status_and_code 403 must_change_password save_verse_text "$VERSE_BODY" "errkey-j-$(date +%s%N)"
+  # Clearing the flag without actually changing the password must be refused,
+  # or the forced change is advisory (R-AUTH-DB-7).
+  status_and_code 422 password_unchanged complete_password_change '{}'
+  TOKEN="$SAVED_TOKEN"
+else
+  notok "must_change_password arrives as HTTP 403" "could not sign in as the reviewer"
+  notok "password_unchanged arrives as HTTP 422" "could not sign in as the reviewer"
+fi
+
+# ---------------------------------------------------------------------------
+echo "# privileged operations are audited (R-AUDIT-1)"
+#
+# APP 14.2 lists a server-side audit trail as an assumption the app relies on
+# and does not attempt to compensate for.
+# ---------------------------------------------------------------------------
+
+psql "$DB_URL" -q -c "update app.verse set text = 'filled for submission', status = 'draft' where chapter_id = '$CHAPTER_ID' and text = ''" >/dev/null 2>&1
+
+SUBMIT=$(auth_rpc submit_chapter "$(printf '{"p_chapter_id":"%s"}' "$CHAPTER_ID")" "submit-key-$(date +%s%N)")
+is "$(json_field "$SUBMIT" workflow_state)" "in_review" "a complete chapter submits over HTTP"
+
+AUDITED=$(psql "$DB_URL" -At -c "select count(*) from app.audit_log where action = 'chapter.submit' and target_id = '$CHAPTER_ID'" 2>/dev/null)
+is "${AUDITED:-0}" "1" "the submission is recorded in the audit log"
+
+AUDIT_SHAPE=$(psql "$DB_URL" -At -c "select actor_profile_id is not null and before is not null and after is not null from app.audit_log where action = 'chapter.submit' and target_id = '$CHAPTER_ID' limit 1" 2>/dev/null)
+is "${AUDIT_SHAPE:-f}" "t" "with an actor and before/after state"
+
+AUDIT_TEXT=$(psql "$DB_URL" -At -c "select count(*) from app.audit_log where after::text like '%filled for submission%'" 2>/dev/null)
+is "${AUDIT_TEXT:-1}" "0" "and no verse text, which is the revision table's job (R-AUDIT-3)"
+
 rm -f "$ERRFILE"
 
 # ---------------------------------------------------------------------------

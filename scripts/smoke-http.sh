@@ -145,6 +145,61 @@ REVS=$(psql "$DB_URL" -At -c "select count(*) from app.verse_revision where vers
 is "${REVS:-x}" "1" "the replay created no second revision (APP R-OFF-4)"
 
 # ---------------------------------------------------------------------------
+echo "# typed errors reach the wire with the right HTTP status (R-ERR-1)"
+#
+# DB 11.2 maps SQLSTATE PT<nnn> to HTTP <nnn>, and PostgREST performs that
+# mapping. It cannot be verified in SQL: pgTAP sees the SQLSTATE, not the
+# status the app will branch on. If the mapping breaks, every typed refusal
+# arrives as a 500 and the app treats it as retryable-unknown, holding the
+# write in its outbox forever (APP R-API-12).
+# ---------------------------------------------------------------------------
+
+# status_and_code <expected-status> <expected-code> <rpc> <json-body> [idempotency-key]
+status_and_code() {
+  local want_status="$1" want_code="$2" rpc="$3" body="$4" key="${5:-}"
+  local out status code
+  out=$(curl -sS -o /tmp/err.json -w '%{http_code}' -X POST "$API_URL/rest/v1/rpc/$rpc"         -H "apikey: $ANON_KEY" -H "Authorization: Bearer $TOKEN"         -H 'Content-Type: application/json'         ${key:+-H "Idempotency-Key: $key"} -d "$body")
+  status="$out"
+  code=$(json_field "$(cat /tmp/err.json)" message)
+  if [ "$status" = "$want_status" ] && [ "$code" = "$want_code" ]; then
+    ok "$want_code arrives as HTTP $want_status"
+  else
+    notok "$want_code arrives as HTTP $want_status" "got status=$status code=$code"
+  fi
+}
+
+VERSE_BODY=$(printf '{"p_verse_id":"%s","p_text":"x","p_reason":"explicit_save"}' "$VERSE_ID")
+
+# 400: no Idempotency-Key header at all (R-IDEM-6).
+status_and_code 400 idempotency_key_required save_verse_text "$VERSE_BODY"
+
+# 400: a reason the server does not recognise.
+status_and_code 400 invalid_argument save_verse_text   "$(printf '{"p_verse_id":"%s","p_text":"x","p_reason":"nonsense"}' "$VERSE_ID")"   "err-key-$(date +%s)-a"
+
+# 422: decomposed text. The literal is e + U+0301, written as an escape so an
+# editor cannot silently turn it into precomposed U+00E9, which is already NFC.
+NFD=$(printf 'eÌclair')
+status_and_code 422 text_not_normalized save_verse_text   "$(printf '{"p_verse_id":"%s","p_text":"%s","p_reason":"explicit_save"}' "$VERSE_ID" "$NFD")"   "err-key-$(date +%s)-b"
+
+# 422: flagging without a comment (R-REVIEW-2).
+status_and_code 422 comment_required flag_verse   "$(printf '{"p_verse_id":"%s","p_body":"  "}' "$VERSE_ID")"   "err-key-$(date +%s)-c"
+
+# 403: a chapter this user is not assigned. Chapter 2 was never assigned.
+OTHER_VERSE=$(psql "$DB_URL" -At -c "select v.id from app.verse v join app.chapter c on c.id = v.chapter_id join app.book b on b.id = c.book_id join app.project p on p.id = b.project_id where p.name = 'Dev Project' and c.number = 2 and v.number = 1" 2>/dev/null)
+if [ -n "$OTHER_VERSE" ]; then
+  status_and_code 403 not_assigned save_verse_text     "$(printf '{"p_verse_id":"%s","p_text":"x","p_reason":"explicit_save"}' "$OTHER_VERSE")"     "err-key-$(date +%s)-d"
+else
+  notok "not_assigned arrives as HTTP 403" "could not find an unassigned verse"
+fi
+
+# 409: an approved chapter is the ONLY condition under which a text write is
+# refused (R-API-11). Set directly, because reaching approval legitimately
+# needs all 25 verses filled and reviewed.
+psql "$DB_URL" -q -c "update app.chapter set workflow_state='approved', approved_at=now(), approved_by_id=(select assigned_reviewer_id from app.chapter where id='$CHAPTER_ID') where id='$CHAPTER_ID'" >/dev/null 2>&1
+status_and_code 409 chapter_locked save_verse_text "$VERSE_BODY" "err-key-$(date +%s)-e"
+psql "$DB_URL" -q -c "update app.chapter set workflow_state='in_progress', approved_at=null, approved_by_id=null where id='$CHAPTER_ID'" >/dev/null 2>&1
+
+# ---------------------------------------------------------------------------
 echo "# the anon key alone is worth nothing (R-RLS-2)"
 # ---------------------------------------------------------------------------
 

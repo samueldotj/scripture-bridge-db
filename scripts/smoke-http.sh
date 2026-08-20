@@ -60,6 +60,13 @@ json_int() {
 }
 count_of() { printf '%s' "$1" | grep -o "\"$2\"" | wc -l | tr -d ' '; }
 
+# Generalised so the reviewer can be driven too, not only the translator.
+sign_in_as() {
+  curl -sS -X POST "$API_URL/auth/v1/token?grant_type=password" \
+       -H "apikey: $ANON_KEY" -H 'Content-Type: application/json' \
+       -d "$(printf '{"email":"%s","password":"%s"}' "$1" "$2")"
+}
+
 sign_in() {
   curl -sS -X POST "$API_URL/auth/v1/token?grant_type=password" \
        -H "apikey: $ANON_KEY" -H 'Content-Type: application/json' \
@@ -321,6 +328,80 @@ is "${AUDIT_SHAPE:-f}" "t" "with an actor and before/after state"
 
 AUDIT_TEXT=$(psql "$DB_URL" -At -c "select count(*) from app.audit_log where after::text like '%filled for submission%'" 2>/dev/null)
 is "${AUDIT_TEXT:-1}" "0" "and no verse text, which is the revision table's job (R-AUDIT-3)"
+
+# ---------------------------------------------------------------------------
+echo "# the review loop and the remaining typed errors"
+# ---------------------------------------------------------------------------
+
+ERRFILE2=$(mktemp)
+
+# The chapter is in_review after the submission above, so submitting again is a
+# transition the state machine does not allow (R-FN-13). An offline client
+# acting on stale state lands here, which is why it is typed rather than a
+# silent no-op.
+status_and_code 409 invalid_transition submit_chapter \
+  "$(printf '{"p_chapter_id":"%s"}' "$CHAPTER_ID")" "errkey-k-$(date +%s%N)"
+
+# Bring the reviewer past the password gate. Deliberately after the gate
+# assertions earlier, which need it still closed.
+REV_NEW_PW="reviewer-changed-7c3d"
+REV_LOGIN=$(sign_in_as "reviewer@local.test" "$INITIAL_PW")
+REV_TOKEN=$(json_field "$REV_LOGIN" access_token)
+if [ -n "$REV_TOKEN" ]; then
+  curl -sS -X PUT "$API_URL/auth/v1/user" -H "apikey: $ANON_KEY" \
+       -H "Authorization: Bearer $REV_TOKEN" -H 'Content-Type: application/json' \
+       -d "$(printf '{"password":"%s"}' "$REV_NEW_PW")" >/dev/null
+  curl -sS -X POST "$API_URL/rest/v1/rpc/complete_password_change" \
+       -H "apikey: $ANON_KEY" -H "Authorization: Bearer $REV_TOKEN" \
+       -H 'Content-Type: application/json' -d '{}' >/dev/null
+fi
+REV_LOGIN=$(sign_in_as "reviewer@local.test" "$REV_NEW_PW")
+REV_TOKEN=$(json_field "$REV_LOGIN" access_token)
+
+if [ -n "$REV_TOKEN" ]; then
+  SAVED_TOKEN="$TOKEN"
+  TOKEN="$REV_TOKEN"
+
+  FLAG=$(auth_rpc flag_verse \
+         "$(printf '{"p_verse_id":"%s","p_body":"consider a clearer word"}' "$VERSE_ID")" \
+         "errkey-l-$(date +%s%N)")
+  is "$(json_field "$FLAG" status)" "flagged" "a reviewer can flag a verse with a comment"
+
+  # R-WF-2: a chapter carrying flagged verses cannot be approved.
+  status_and_code 422 chapter_has_flags review_chapter \
+    "$(printf '{"p_chapter_id":"%s","p_decision":"approve"}' "$CHAPTER_ID")" \
+    "errkey-m-$(date +%s%N)"
+
+  TOKEN="$SAVED_TOKEN"
+
+  # A flagged verse is cleared by resolving the comment, not by the translator
+  # re-marking it done (R-REVIEW-3).
+  status_and_code 422 verse_flagged set_verse_status \
+    "$(printf '{"p_verse_id":"%s","p_status":"done"}' "$VERSE_ID")" \
+    "errkey-n-$(date +%s%N)"
+else
+  notok "a reviewer can flag a verse with a comment" "could not sign the reviewer in"
+  notok "chapter_has_flags arrives as HTTP 422"      "could not sign the reviewer in"
+  notok "verse_flagged arrives as HTTP 422"          "could not sign the reviewer in"
+fi
+
+# 401 with no Authorization header. The code is asserted as well as the status,
+# so a gateway-level rejection is not mistaken for the API's own refusal.
+UNAUTH=$(curl -sS -o "$ERRFILE2" -w '%{http_code}' -X POST "$API_URL/rest/v1/rpc/save_verse_text" \
+         -H "apikey: $ANON_KEY" -H 'Content-Type: application/json' \
+         -H "Idempotency-Key: unauth-$(date +%s%N)" \
+         -d "$(printf '{"p_verse_id":"%s","p_text":"x","p_reason":"autosave"}' "$VERSE_ID")")
+is "$UNAUTH" "401" "unauthenticated arrives as HTTP 401"
+is "$(json_field "$(cat "$ERRFILE2")" message)" "unauthenticated" "carrying the API's own code"
+
+# APP R-LEGAL-1: the app presents a consent notice at first sign-in and records
+# the acknowledgement through the API.
+CONSENT=$(auth_rpc record_consent '{"p_version":"2026-08-01"}' "consent-$(date +%s%N)")
+is "$(json_bool "$CONSENT" accepted)" "true" "the consent acknowledgement is recorded"
+CONSENT_ROW=$(psql "$DB_URL" -At -c "select count(*) from app.consent_record where version = '2026-08-01'" 2>/dev/null)
+is "${CONSENT_ROW:-0}" "1" "and stored with its version, so a changed notice can be re-presented"
+
+rm -f "$ERRFILE2"
 
 rm -f "$ERRFILE"
 

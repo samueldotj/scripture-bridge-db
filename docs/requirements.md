@@ -906,6 +906,9 @@ app.audit_log   id, occurred_at, actor_profile_id, actor_kind ('user'|'console'|
 
 - **R-OPS-6.** `pg_cron` runs: idempotency-key pruning (§9, daily), change-log pruning and
   watermark update (§10.3, daily), and counter reconciliation reporting (§5.7, weekly).
+  Scheduled by `scripts/schedule-jobs.sql`, run once per environment after migrations —
+  deliberately not a migration, because creating `pg_cron` in one breaks `supabase db reset`
+  wherever the extension is unavailable, and only staging and production should prune.
 - **R-OPS-7.** Each job logs its outcome to a table an operator can query. A pruning job that
   silently stops running presents months later as a cursor that never expires, or a table that
   grew without bound.

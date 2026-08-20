@@ -381,14 +381,11 @@ grant execute on function api.search_verses(uuid, text, int, int) to authenticat
 -- ---------------------------------------------------------------------------
 -- Scheduling (run once per environment, not in a migration)
 --
---   create extension if not exists pg_cron;
+--   psql "$DB_URL" -f scripts/schedule-jobs.sql
 --
---   select cron.schedule('prune-change-log', '17 3 * * *',
---                        $job$ select app.prune_change_log(90) $job$);
---   select cron.schedule('prune-idempotency', '32 3 * * *',
---                        $job$ select app.prune_idempotency_keys(7) $job$);
---   select cron.schedule('reconcile-counters', '5 4 * * 0',
---                        $job$ select count(*) from app.reconcile_chapter_counters(false) $job$);
+-- The statements live there rather than in this comment so there is one copy to
+-- keep correct. Without them nothing prunes: the change log grows without
+-- bound, the watermark is never written, and cursor_expired can never fire.
 --
 -- Retention windows are asserted from the connectivity profile in APP §2.3, not
 -- measured. Revisit after the pilot with real device sync intervals (§17 #9).

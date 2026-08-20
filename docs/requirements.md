@@ -86,9 +86,16 @@ the rest of this document.
   recovery (§13.2) and the absence of project pausing are the reasons; free-tier projects pause
   after inactivity, which is disqualifying for a field pilot. Development and CI may run on the
   local stack and the free tier.
-- **R-PLAT-DB-3.** Region selection is a data-residency decision (APP §2.4) and must be made
-  before the first production project is created. Supabase projects cannot change region after
-  creation; changing it means creating a new project and migrating.
+- **R-PLAT-DB-3. Region: India (`ap-south-1`, Mumbai).** *(Decided.)* A data-residency
+  decision (APP §2.4), and immutable: Supabase projects cannot change region after creation, so
+  changing it means a new project and a data migration. Confirm it is still the closest offered
+  region when the project is created — the list grows.
+  Two consequences follow. Scheduled maintenance windows are chosen in IST rather than UTC
+  (`scripts/schedule-jobs.sql`), because a window picked in UTC lands in the working day of the
+  people affected. And India's DPDP Act is the governing personal-data regime: the obligations
+  this schema already carries are consent capture (R-COMPLY-1) and erasure that preserves
+  translation history (R-COMPLY-2, tested in `07_erasure.sql`). Whether anything further is
+  required is a question for the project's own legal advice, not an engineering decision.
 
 ---
 
@@ -1011,7 +1018,7 @@ each end-to-end budget for network and rendering.
 |---|---|---|
 | 1 | Confirm the Postgres version on the provisioned Supabase project meets R-PLAT-DB-1 (15+). Three requirements depend on it (§2). | Verification |
 | 2 | **Confirm the refresh-token settings on the live project: rotation on, reuse interval ≥ 300 s, no inactivity timeout, no session time-box** (R-AUTH-DB-9/10). This answers APP §20 #1. It is the configuration most likely to lock a translator out irrecoverably in the field. | Verification |
-| 3 | Region and data-residency decision before the production project is created; it cannot be changed afterwards (R-PLAT-DB-3). | Decision |
+| 3 | ~~Region and data-residency decision before the production project is created.~~ **Closed: India, `ap-south-1` (Mumbai)** (R-PLAT-DB-3). Confirm it is still the nearest offered region at creation. | Closed |
 | 4 | **USFM round-trip: sidecar markup storage, or accept structurally plain export?** (R-USFM-2). Determines whether the MVP's vertical slice ends in output the partner organisation can publish. Depends on APP §20 #8. | Decision |
 | 5 | Which versification scheme for the first cohort (R-DATA-2)? Immutable per project, and wrong choices surface only at export. | Decision |
 | 6 | **APP §13.5 must be amended with the ten new error codes of §11.2**, or the app will treat non-retryable failures as retryable and hold them in the outbox forever (APP R-API-12). The set grew from five to ten as the write RPCs were implemented; treat it as final only once those are tested. | Dependency |

@@ -34,12 +34,14 @@ end;
 $$;
 
 -- ---------------------------------------------------------------------------
--- Schedules are in UTC.
+-- Schedules are in UTC. The deployment region is India (ap-south-1, Mumbai),
+-- so each time below is annotated with its IST equivalent (UTC+5:30).
 --
--- 03:00 UTC is the middle of the working day in some deployment regions. These
--- jobs are cheap - a few thousand row deletes - so the window matters less than
--- it would for a heavy job, but if that changes, pick a quiet hour in the
--- REGION rather than a quiet hour in UTC.
+-- An earlier version ran these at 03:17 UTC, which is 08:47 IST - the start of
+-- the working day for the people using the system. They now run in the small
+-- hours local time. The jobs are cheap, so this is about habit rather than
+-- load: a maintenance window chosen in UTC drifts into the working day of
+-- whoever is actually affected, and the next job added here may not be cheap.
 -- ---------------------------------------------------------------------------
 
 -- R-SYNC-6: 90 days. Also maintains the watermark, which is what lets
@@ -47,7 +49,7 @@ $$;
 -- refetch". Pruning and cursor_expired are one mechanism, not two.
 select cron.schedule(
   'scripture-prune-change-log',
-  '17 3 * * *',
+  '47 20 * * *',   -- 02:17 IST
   $job$ select app.prune_change_log(90) $job$
 );
 
@@ -56,7 +58,7 @@ select cron.schedule(
 -- a week covers a field trip).
 select cron.schedule(
   'scripture-prune-idempotency-keys',
-  '32 3 * * *',
+  '2 21 * * *',    -- 02:32 IST
   $job$ select app.prune_idempotency_keys(7) $job$
 );
 
@@ -64,7 +66,7 @@ select cron.schedule(
 -- automatic repair would paper over whatever is producing the drift.
 select cron.schedule(
   'scripture-reconcile-counters',
-  '5 4 * * 0',
+  '35 21 * * 6',   -- Sunday 03:05 IST (Saturday in UTC)
   $job$ select app.run_counter_reconciliation() $job$
 );
 
